@@ -10,9 +10,14 @@ const scoreDisplay = document.getElementById('score');
 // Game Variables
 let score = 0;
 let gameStarted = false;
-let gameSpeed = 2; // Initial speed of pipes and background
-let pipeFrequency = 100; // How often new pipes are generated (in frames)
-let frameCount = 0;
+const FPS_TARGET = 60; // Target FPS for consistent speed calculations
+
+let gameSpeedPerSecond = 2 * FPS_TARGET; // Pipes and background speed in pixels per second
+let currentPipeFrequencyFrames = 100; // How often new pipes are generated (in terms of original frame counts for logic)
+let pipeSpawnIntervalSeconds = currentPipeFrequencyFrames / FPS_TARGET;
+let pipeSpawnTimer = 0;
+
+let lastTime; // For delta time calculation
 
 // Load bird image
 const birdImage = new Image();
@@ -30,26 +35,23 @@ scoreSound.load(); // Start loading the sound
 const bird = {
     x: 50,
     y: 150,
-    width: 40, // Adjust width based on your Image aspect ratio
-    height: 30, // Adjust height based on your Image aspect ratio
-    gravity: 0.6,
-    lift: -10,
-    velocity: 0,
+    width: 40,
+    height: 30,
+    gravity: 0.6 * FPS_TARGET * FPS_TARGET, // pixels/sec^2
+    lift: -10 * FPS_TARGET, // pixels/sec (velocity change on flap)
+    velocity: 0, // pixels/sec
     draw: function() {
-        // Draw the bird image if loaded, otherwise fallback to a rectangle
         ctx.drawImage(birdImage, this.x, this.y, this.width, this.height);
     },
-    update: function() {
-        this.velocity += this.gravity;
-        this.y += this.velocity;
+    update: function(dt) { // dt is delta time in seconds
+        this.velocity += this.gravity * dt;
+        this.y += this.velocity * dt;
 
-        // Prevent bird from going off screen (top)
         if (this.y < 0) {
             this.y = 0;
             this.velocity = 0;
         }
 
-        // Game over if bird hits bottom
         if (this.y + this.height > canvas.height) {
             this.y = canvas.height - this.height;
             this.velocity = 0;
@@ -64,59 +66,56 @@ const bird = {
 // Pipe Properties
 let pipes = [];
 const pipeWidth = 50;
-const pipeGap = 150; // Gap between upper and lower pipe
+const pipeGap = 150;
 
 function drawPipes() {
     ctx.fillStyle = 'green';
     for (let i = 0; i < pipes.length; i++) {
         const pipe = pipes[i];
-        ctx.fillRect(pipe.x, 0, pipeWidth, pipe.topHeight); // Upper pipe
-        ctx.fillRect(pipe.x, canvas.height - pipe.bottomHeight, pipeWidth, pipe.bottomHeight); // Lower pipe
+        ctx.fillRect(pipe.x, 0, pipeWidth, pipe.topHeight);
+        ctx.fillRect(pipe.x, canvas.height - pipe.bottomHeight, pipeWidth, pipe.bottomHeight);
     }
 }
 
-function updatePipes() {
+function updatePipes(dt) { // dt is delta time in seconds
     for (let i = 0; i < pipes.length; i++) {
         const pipe = pipes[i];
-        pipe.x -= gameSpeed;
+        pipe.x -= gameSpeedPerSecond * dt;
 
-        // Collision detection
         if (
             bird.x < pipe.x + pipeWidth &&
             bird.x + bird.width > pipe.x &&
             (bird.y < pipe.topHeight || bird.y + bird.height > canvas.height - pipe.bottomHeight)
         ) {
             gameOver();
+            return; // Stop further pipe processing if game over
         }
 
-        // Score point
         if (pipe.x + pipeWidth < bird.x && !pipe.scored) {
             if (soundLoaded) {
-                scoreSound.currentTime = 0; // Rewind to the start
+                scoreSound.currentTime = 0;
                 scoreSound.play();
             } else {
-                // Fallback or log if sound not loaded yet, though 'canplaythrough' should handle this
                 console.log("Score sound not ready yet.");
             }
             score++;
             scoreDisplay.textContent = `Score: ${score}`;
             pipe.scored = true;
-            // Increase difficulty
-            if (score % 5 === 0) { // Every 5 points
-                gameSpeed += 0.2;
-                if (pipeFrequency > 60) { // Don't make it too frequent
-                    pipeFrequency -= 5;
+            if (score % 5 === 0) {
+                gameSpeedPerSecond += (0.2 * FPS_TARGET);
+                if (currentPipeFrequencyFrames > 60) {
+                    currentPipeFrequencyFrames -= 5;
+                    pipeSpawnIntervalSeconds = currentPipeFrequencyFrames / FPS_TARGET;
                 }
             }
         }
     }
 
-    // Remove pipes that are off-screen
     pipes = pipes.filter(pipe => pipe.x + pipeWidth > 0);
 
-    // Add new pipes
-    if (frameCount % pipeFrequency === 0) {
-        const topHeight = Math.random() * (canvas.height - pipeGap - 50) + 25; // Ensure some minimum height and not too close to edge
+    pipeSpawnTimer += dt;
+    if (pipeSpawnTimer >= pipeSpawnIntervalSeconds) {
+        const topHeight = Math.random() * (canvas.height - pipeGap - 50) + 25;
         const bottomHeight = canvas.height - topHeight - pipeGap;
         pipes.push({
             x: canvas.width,
@@ -124,34 +123,44 @@ function updatePipes() {
             bottomHeight: bottomHeight,
             scored: false
         });
+        pipeSpawnTimer = 0; // Reset timer
     }
 }
 
-
 // Game Loop
-function gameLoop() {
+function gameLoop(currentTime) {
     if (!gameStarted) return;
+
+    if (lastTime === undefined) {
+        lastTime = currentTime;
+        requestAnimationFrame(gameLoop);
+        return;
+    }
+
+    const deltaTime = (currentTime - lastTime) / 1000; // seconds
+    lastTime = currentTime;
+
+    // Clamp deltaTime to prevent large jumps (e.g., if tab was inactive)
+    const dt = Math.min(deltaTime, 1 / 30); // Max step of 1/30th of a second
 
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // Update and draw bird
-    bird.update();
+    bird.update(dt);
     bird.draw();
 
     // Update and draw pipes
-    updatePipes();
+    updatePipes(dt);
     drawPipes();
 
-
-    frameCount++;
     requestAnimationFrame(gameLoop);
 }
 
 // Game Over
 function gameOver() {
     gameStarted = false;
-    startScreen.style.display = 'flex'; // Show start screen again
+    startScreen.style.display = 'flex';
 }
 
 // Event Listeners
@@ -161,63 +170,68 @@ function handleInput() {
     }
 }
 
+function startGame() {
+    startScreen.style.display = 'none';
+    resetGame();
+    gameStarted = true;
+    lastTime = undefined; // Reset lastTime for the new game session
+    requestAnimationFrame(gameLoop);
+}
+
 document.addEventListener('keydown', function(event) {
     if (event.code === 'Space') {
-        if (!gameStarted && startScreen.style.display !== 'none') { // Check if start screen is visible
-            startScreen.style.display = 'none';
-            resetGame();
-            gameStarted = true;
-            gameLoop();
-        } else if (gameStarted) { // Only flap if game is active
+        if (!gameStarted && startScreen.style.display !== 'none') {
+            startGame();
+        } else if (gameStarted) {
             handleInput();
         }
     }
 });
 
-canvas.addEventListener('click', () => { // Modified to ensure click also starts game if not started
+canvas.addEventListener('click', () => {
     if (!gameStarted && startScreen.style.display !== 'none') {
-        startScreen.style.display = 'none';
-        resetGame();
-        gameStarted = true;
-        gameLoop();
+        startGame();
     } else {
         handleInput();
     }
 });
 
-
-startButton.addEventListener('click', () => {
-    startScreen.style.display = 'none';
-    resetGame();
-    gameStarted = true;
-    gameLoop();
-});
+startButton.addEventListener('click', startGame);
 
 // Reset Game
 function resetGame() {
+    bird.x = canvas.width / 4; // Position bird further to the right
     bird.y = canvas.height / 4; // Reset bird's y position relative to canvas height
     bird.velocity = 0;
-    pipes.length = 0; // Clear pipes array
+    pipes.length = 0;
     score = 0;
     scoreDisplay.textContent = 'Score: 0';
-    gameSpeed = 2;
-    pipeFrequency = 100;
-    frameCount = 0;
+    
+    gameSpeedPerSecond = 2 * FPS_TARGET;
+    currentPipeFrequencyFrames = 100;
+    pipeSpawnIntervalSeconds = currentPipeFrequencyFrames / FPS_TARGET;
+    pipeSpawnTimer = 0;
+    lastTime = undefined; // Ensure timing is reset for the game loop
 }
 
-// Initialize Canvas Size (can be adjusted)
+// Initialize Canvas Size
 function init() {
-    if(window.innerWidth >= 640) {
-        canvas.width = 400;
-    } else {
+    if (window.innerWidth <= 1024) {
         canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    } else {
+        canvas.width = 400; // Fixed width for larger screens
+        canvas.height = window.innerHeight; // Full height
     }
-    canvas.height = window.innerHeight;
 
-    scoreDisplay.textContent = 'Score: 0'; // Initialize score display
-    // Draw initial bird position or a static background if desired before game starts
-    // bird.draw();
+    scoreDisplay.textContent = 'Score: 0';
+    // Call resetGame here if you want bird position and other game vars initialized
+    // based on canvas size immediately, though startGame already calls it.
+    // For now, bird's initial state before game start is from its object definition.
+    // If bird needs to be drawn pre-game at a scaled position, resetGame() and bird.draw() could be here.
 }
 
 // Start
 init();
+// Add resize listener if you want the canvas to adjust on window resize dynamically
+window.addEventListener('resize', init);
